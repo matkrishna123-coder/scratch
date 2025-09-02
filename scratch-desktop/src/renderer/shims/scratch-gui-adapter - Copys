@@ -1,0 +1,94 @@
+// Re-export the default GUI HOC (what desktop uses as <GUI />)
+// export { default } from '@scratch/scratch-gui';
+
+// Unwrapped presentational component
+// export { default as GUIComponent } from '@scratch/scratch-gui/src/components/gui/gui.jsx';
+
+// Project state bits desktop expects
+//  export {
+//   LoadingStates,
+//   openLoadingProject,
+//   closeLoadingProject,
+//   requestProjectUpload,
+//   onFetchedProjectData,
+//   onLoadedProject,
+//   requestNewProject
+//  } from '@scratch/scratch-gui/src/reducers/project-state';
+
+// Project id helpers
+//export { setProjectId, defaultProjectId } from '@scratch/scratch-gui/src/reducers/project-id';
+
+// Telemetry modal action
+//export { openTelemetryModal } from '@scratch/scratch-gui/src/reducers/modals';
+
+
+
+// Single, stable place to import GUI+reducers from source when @scratch/scratch-gui
+// is linked (file:../scratch-gui). We also provide compatibility re-exports.
+
+//
+// GUI (component + HOC + setAppElement)
+//
+// Single, stable place to import GUI+reducers from source when @scratch/scratch-gui
+// is linked (file:../scratch-gui). We also provide compatibility re-exports.
+
+//
+// GUI (component + HOC)
+//
+import GUIComponent from '@scratch/scratch-gui/src/components/gui/gui.jsx';
+import AppStateHOC  from '@scratch/scratch-gui/src/lib/app-state-hoc.jsx';
+
+// setAppElement lives in src/index.js for this GUI version
+import {setAppElement} from '@scratch/scratch-gui/src/index.js';
+import {initLocale, initFullScreen, initPlayer}
+  from '@scratch/scratch-gui/src/index.js';
+  
+
+//
+// Project state bits
+//
+import {
+  LoadingStates,
+  onFetchedProjectData,
+  onLoadedProject,
+  requestNewProject,
+  requestProjectUpload,
+  setProjectId,
+  defaultProjectId,
+  localesInitialState   
+} from '@scratch/scratch-gui/src/reducers/project-state';
+
+//
+// Modals (telemetry button etc.)
+//
+import {openTelemetryModal} from '@scratch/scratch-gui/src/reducers/modals';
+
+// What desktop code expects to import:
+export {
+  GUIComponent,
+  AppStateHOC,
+  setAppElement,
+  LoadingStates,
+  onFetchedProjectData,
+  onLoadedProject,
+  requestNewProject,
+  requestProjectUpload,
+  setProjectId,
+  defaultProjectId,
+  localesInitialState,
+  openTelemetryModal
+};
+export { initLocale, initFullScreen, initPlayer };
+
+// Compatibility for older names (removed in newer GUI):
+// export const openLoadingProject  = onFetchedProjectData;
+// export const closeLoadingProject = onLoadedProject;
+
+
+ // Compatibility for older desktop code: provide benign actions so dispatch() never gets undefined.
+ export const openLoadingProject  = () => ({ type: '@@scratch-desktop/OPEN_LOADING_PROJECT' });
+ export const closeLoadingProject = () => ({ type: '@@scratch-desktop/CLOSE_LOADING_PROJECT' });
+
+
+// Keep default export so `import GUI from '@scratch-gui-adapter'` works
+export default GUIComponent;

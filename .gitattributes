@@ -1,0 +1,31 @@
+* text=auto
+
+# Source files — keep LF in the repo
+*.js   text eol=lf
+*.jsx  text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sh   text eol=lf
+*.svg  text eol=lf
+*.hex  text eol=lf
+
+# Windows scripts can stay CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Binaries
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.woff binary
+*.woff2 binary
+*.ttf  binary
+*.eot  binary
