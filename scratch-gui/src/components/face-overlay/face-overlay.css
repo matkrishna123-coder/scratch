@@ -1,0 +1,6 @@
+.faceOverlayCanvas {
+  position: absolute;
+  pointer-events: none;
+  z-index: 1000; /* over the stage & dragging sprite */
+  /* left/top/size set dynamically */
+}

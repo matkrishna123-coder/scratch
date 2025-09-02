@@ -1,0 +1,10 @@
+{
+  "version": "v1",
+  "packages": {
+    "scratch-vm": {
+      "signature": "c71a169e8650ae795a11a9fe3aabefc5",
+      "file": true,
+      "replaced": "^5.0.0"
+    }
+  }
+}
