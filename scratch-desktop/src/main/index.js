@@ -84,7 +84,7 @@ const displayPermissionDeniedWarning = (browserWindow, permissionType) => {
 
     dialog.showMessageBox(browserWindow, {type: 'warning', title, message});
 };
-
+app.commandLine.appendSwitch('disable-extensions');
 /**
  * Build an absolute URL from a relative one, optionally adding search query parameters.
  * The base of the URL will depend on whether or not the application is running in development mode.
@@ -208,8 +208,10 @@ const createWindow = ({search = null, url = 'index.html', ...browserWindowOption
     });
 
     const fullUrl = makeFullUrl(url, search);
+    console.log('Main process: Loading URL:', fullUrl);
     window.loadURL(fullUrl);
     window.once('ready-to-show', () => {
+        console.log('Main process: Window ready to show');
         webContents.send('ready-to-show');
     });
 
@@ -293,11 +295,13 @@ const getIsProjectSave = downloadItem => {
 };
 
 const createMainWindow = () => {
+    console.log('Main process: Creating main window');
     const window = createWindow({
         width: defaultSize.width,
         height: defaultSize.height,
         title: `${packageJson.productName} ${packageJson.version}` // something like "Scratch 3.14"
     });
+    console.log('Main process: Main window created');
     const webContents = window.webContents;
 
     webContents.session.on('will-download', (willDownloadEvent, downloadItem) => {
@@ -417,43 +421,70 @@ if (process.platform === 'win32') {
     }
 }
 
-// create main BrowserWindow when electron is ready
 app.on('ready', () => {
-    if (isDevelopment) {
-        import('electron-devtools-installer').then(importedModule => {
-            const {default: installExtension, ...devToolsExtensions} = importedModule;
-            const extensionsToInstall = [
-                devToolsExtensions.REACT_DEVELOPER_TOOLS,
-                devToolsExtensions.REDUX_DEVTOOLS
-            ];
-            for (const extension of extensionsToInstall) {
-                // WARNING: depending on a lot of things including the version of Electron `installExtension` might
-                // return a promise that never resolves, especially if the extension is already installed.
-                installExtension(extension).then(
-                    extensionName => log(`Installed dev extension: ${extensionName}`),
-                    errorMessage => log.error(`Error installing dev extension: ${errorMessage}`)
-                );
-            }
-        });
-    }
+    console.log('Main process: App ready, creating windows');
+    // Skip installing React/Redux devtools extensions — they cause sandbox errors on Electron 25+
+    // Use the built-in DevTools (Ctrl+Shift+I / Cmd+Opt+I) instead.
 
     _windows.main = createMainWindow();
-    _windows.main.on('closed', () => {
-        delete _windows.main;
-    });
+    console.log('Main process: Main window assigned');
+    _windows.main.on('closed', () => { delete _windows.main; });
+
     _windows.about = createAboutWindow();
-    _windows.about.on('close', event => {
-        event.preventDefault();
-        _windows.about.hide();
-    });
+    _windows.about.on('close', event => { event.preventDefault(); _windows.about.hide(); });
+
     _windows.privacy = createPrivacyWindow();
-    _windows.privacy.on('close', event => {
-        event.preventDefault();
-        _windows.privacy.hide();
-    });
+    _windows.privacy.on('close', event => { event.preventDefault(); _windows.privacy.hide(); });
 
     _windows.usb = createUsbWindow();
 });
+
+// create main BrowserWindow when electron is ready
+// app.on('ready', () => {
+//     // if (isDevelopment) {
+//     //     import('electron-devtools-installer').then(importedModule => {
+//     //         const {default: installExtension, ...devToolsExtensions} = importedModule;
+//     //         const extensionsToInstall = [
+//     //             devToolsExtensions.REACT_DEVELOPER_TOOLS,
+//     //             devToolsExtensions.REDUX_DEVTOOLS
+//     //         ];
+//     //         for (const extension of extensionsToInstall) {
+//     //             // WARNING: depending on a lot of things including the version of Electron `installExtension` might
+//     //             // return a promise that never resolves, especially if the extension is already installed.
+//     //             installExtension(extension).then(
+//     //                 extensionName => log(`Installed dev extension: ${extensionName}`),
+//     //                 errorMessage => log.error(`Error installing dev extension: ${errorMessage}`)
+//     //             );
+//     //         }
+//     //     });
+//     // }
+// if (isDevelopment) {
+//   import('electron-devtools-installer')
+//     .then(({default: installExtension, REACT_DEVELOPER_TOOLS}) =>
+//       installExtension(REACT_DEVELOPER_TOOLS)
+//         .then(name => log(`Installed dev extension: ${name}`))
+//         .catch(err => log.warn(`Devtools install failed: ${err}`))
+//     )
+//     .catch(err => log.warn(`Devtools import failed: ${err}`));
+// }
+
+//       _windows.main = createMainWindow();
+//     _windows.main.on('closed', () => {
+//         delete _windows.main;
+//     });
+//     _windows.about = createAboutWindow();
+//     _windows.about.on('close', event => {
+//         event.preventDefault();
+//         _windows.about.hide();
+//     });
+//     _windows.privacy = createPrivacyWindow();
+//     _windows.privacy.on('close', event => {
+//         event.preventDefault();
+//         _windows.privacy.hide();
+//     });
+
+//     _windows.usb = createUsbWindow();
+// });
 
 ipcMain.on('open-about-window', () => {
     _windows.about.show();

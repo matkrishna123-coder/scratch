@@ -1,4 +1,3 @@
-
 import React from 'react';
 import {render} from 'react-dom';
 
@@ -6,32 +5,26 @@ import {
   GUIComponent as GUI,
   AppStateHOC,
   setAppElement,
+  initLocale,
+  initFullScreen,
+  initPlayer,
+  guiInitialState,
   localesInitialState
 } from '@scratch-gui-adapter';
 
 import ScratchDesktopGUIHOC from './ScratchDesktopGUIHOC.jsx';
-import ElectronStorageHelper from '../common/ElectronStorageHelper';
 
-// Wrap GUI with desktop HOC, then wrap that with AppStateHOC.
-// 2nd arg: init-state transform (none for desktop)
-// 3rd arg: locales payload so locales.isRtl etc are defined
-const localesPayload = localesInitialState ?? {messagesByLocale: {}, locale: 'en', isRtl: false};
-const Wrapped = AppStateHOC(ScratchDesktopGUIHOC(GUI), null, localesPayload);
+// Wrap GUI with desktop HOC + app-state HOC (same pattern as upstream)
+const Wrapped = AppStateHOC(ScratchDesktopGUIHOC(GUI));
 
-// react-modal needs to know the app root
+// Tell react-modal which element is the app root (a11y)
 setAppElement(document.getElementById('app'));
 
-// Let the HOC initialize storage helpers (this must be passed to the HOC itself)
-const handleStorageInit = storage => {
-  storage.addHelper(new ElectronStorageHelper(storage));
-};
+// Initialize GUI bits in the expected order
+initFullScreen(guiInitialState);
+// IMPORTANT: initLocale expects a messagesByLocale map, not the whole reducer state
+initLocale((localesInitialState && localesInitialState.messagesByLocale) || {});
+initPlayer(guiInitialState);
 
-render(
-  <Wrapped
-    isScratchDesktop
-    canSave={false}
-    canEditTitle
-    onStorageInit={handleStorageInit}
-  />,
-  document.getElementById('app')
-);
+// Mount the app
+render(<Wrapped isScratchDesktop />, document.getElementById('app'));

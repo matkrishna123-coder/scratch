@@ -173,6 +173,8 @@ module.exports = makeConfig(
           {
             from: 'extension-worker.{js,js.map}',
             context: GUI_ROOT,
+            from: 'chunks/fetch-worker.*.{js,js.map}',
+            to: 'chunks',
             noErrorOnMissing: true
           },
           // Libraries: present in published GUI; may be absent in local src

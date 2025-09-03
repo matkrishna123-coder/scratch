@@ -6,7 +6,6 @@ import React from 'react';
 import {connect} from 'react-redux';
 
 import {
-  GUIComponent,
   LoadingStates,
   onFetchedProjectData,
   onLoadedProject,
@@ -17,28 +16,41 @@ import {
   openTelemetryModal
 } from '@scratch-gui-adapter';
 
+import ElectronStorageHelper from '../common/ElectronStorageHelper';
 import showPrivacyPolicy from './showPrivacyPolicy';
 
+/**
+ * Higher-order component to add desktop logic to the GUI.
+ * @param {Component} WrappedComponent - a GUI-like component to wrap.
+ * @returns {Component} - a component similar to GUI with desktop-specific logic added.
+ */
 const ScratchDesktopGUIHOC = function (WrappedComponent) {
   class ScratchDesktopGUIComponent extends React.Component {
     constructor (props) {
       super(props);
       bindAll(this, [
         'handleProjectTelemetryEvent',
-        'handleSetTitleFromSave'
+        'handleSetTitleFromSave',
+        'handleStorageInit',
+        'handleUpdateProjectTitle'
       ]);
 
-      // kick off initial-project check/load
+      // Load a file passed on the CLI (if any); otherwise start fresh.
       ipcRenderer.invoke('get-initial-project-data').then(initialProjectData => {
-        const hasInitialProject = initialProjectData && (initialProjectData.length > 0);
+        const hasInitialProject = !!(initialProjectData && initialProjectData.length > 0);
+
+        // Tell GUI whether we’ll load from a file (matches sb-file-uploader flow)
         this.props.onHasInitialProject(hasInitialProject, this.props.loadingState);
 
         if (!hasInitialProject) {
-          // no file passed: just land on default project
+          // No file passed: GUI will create a fresh default project via setProjectId(defaultProjectId)
           return;
         }
 
-        // we asked GUI to enter "uploading" state via requestProjectUpload in onHasInitialProject
+        // Inform GUI we have bytes to load (transitions state out of NOT_LOADED)
+        this.props.onFetchedInitialProjectData(initialProjectData, this.props.loadingState);
+
+        // Load project bytes into VM
         this.props.vm.loadProject(initialProjectData).then(
           () => {
             this.props.onLoadedProject(this.props.loadingState, true);
@@ -52,7 +64,7 @@ const ScratchDesktopGUIHOC = function (WrappedComponent) {
               detail: e.message
             });
 
-            // fall back to default project
+            // Reset to default project and start fresh
             this.props.onHasInitialProject(false, this.props.loadingState);
             this.props.onRequestNewProject();
           }
@@ -74,17 +86,24 @@ const ScratchDesktopGUIHOC = function (WrappedComponent) {
       ipcRenderer.send(event, metadata);
     }
     handleSetTitleFromSave (_event, args) {
-      document.title = `${args.title} — Scratch`;
+      this.handleUpdateProjectTitle(args.title);
+    }
+    handleStorageInit (storageInstance) {
+      storageInstance.addHelper(new ElectronStorageHelper(storageInstance));
+    }
+    handleUpdateProjectTitle (newTitle) {
+      this.setState({projectTitle: newTitle});
     }
 
     render () {
-      // Don’t pass HOC-only props down to DOM nodes inside GUI.
+      // IMPORTANT: don’t pass HOC-internal props (incl. vm) down to GUI
       const childProps = omit(this.props, Object.keys(ScratchDesktopGUIComponent.propTypes));
 
       return (
         <WrappedComponent
           canEditTitle
           canSave={false}
+          canModifyCloudData={false}
           onClickAbout={[
             { title: 'About', onClick: () => this.handleClickAbout() },
             { title: 'Privacy Policy', onClick: () => showPrivacyPolicy() },
@@ -92,6 +111,8 @@ const ScratchDesktopGUIHOC = function (WrappedComponent) {
           ]}
           onProjectTelemetryEvent={this.handleProjectTelemetryEvent}
           onShowPrivacyPolicy={showPrivacyPolicy}
+          onStorageInit={this.handleStorageInit}
+          onUpdateProjectTitle={this.handleUpdateProjectTitle}
           platform="DESKTOP"
           {...childProps}
         />
@@ -100,34 +121,41 @@ const ScratchDesktopGUIHOC = function (WrappedComponent) {
   }
 
   ScratchDesktopGUIComponent.propTypes = {
-    loadingState: PropTypes.oneOf(LoadingStates),
+    loadingState: PropTypes.oneOf(Object.values(LoadingStates)),
     onFetchedInitialProjectData: PropTypes.func,
     onHasInitialProject: PropTypes.func,
     onLoadedProject: PropTypes.func,
     onRequestNewProject: PropTypes.func,
     onTelemetrySettingsClicked: PropTypes.func,
-    vm: GUIComponent.WrappedComponent.propTypes.vm
+    vm: PropTypes.object.isRequired
   };
 
-  const mapStateToProps = state => ({
-    loadingState: state.scratchGui.projectState.loadingState,
-    vm: state.scratchGui.vm
-  });
+  const mapStateToProps = state => {
+    const loadingState = state.scratchGui.projectState.loadingState;
+    return {
+      loadingState,
+      vm: state.scratchGui.vm
+    };
+  };
 
   const mapDispatchToProps = dispatch => ({
-    // NO spinner open/close actions; rely on requestProjectUpload + onLoadedProject
+    // If we have initial bytes, emulate the sb-file-uploader path
     onHasInitialProject: (hasInitialProject, loadingState) => {
       if (hasInitialProject) {
         return dispatch(requestProjectUpload(loadingState));
       }
+      // set default project id (acts like “create new”)
       return dispatch(setProjectId(defaultProjectId));
     },
+
     onFetchedInitialProjectData: (projectData, loadingState) =>
       dispatch(onFetchedProjectData(projectData, loadingState)),
+
     onLoadedProject: (loadingState, loadSuccess) => {
       const canSaveToServer = false;
       return dispatch(onLoadedProject(loadingState, canSaveToServer, loadSuccess));
     },
+
     onRequestNewProject: () => dispatch(requestNewProject(false)),
     onTelemetrySettingsClicked: () => dispatch(openTelemetryModal())
   });
