@@ -1,33 +1,20 @@
-// A single stable import surface for @scratch/scratch-gui, whether linked from source
-// (file:../scratch-gui) or installed from npm.
-//
-// We export the *bare* presentational GUI as default, plus the AppState HOC and
-// the initializer helpers from GUI's src/index.js. We also re-export the action
-// creators/enums desktop uses.
+// Single, stable place to import GUI + helpers from @scratch/scratch-gui source.
+// This version pulls the *container* (not the presentational component) so the
+// renderer is attached to the VM before <Stage> mounts.
 
 //
-// Helpers + initial state builders from GUI's src/index.js
+// GUI (container) + AppState HOC
 //
-import {
-  setAppElement,
-  initLocale,
-  initFullScreen,
-  initPlayer,
-  initEmbedded,
-  guiInitialState,
-  localesInitialState
-} from '@scratch/scratch-gui/src/index.js';
-
-//
-// Bare GUI component & AppState HOC
-//
-import GUIComponent from '@scratch/scratch-gui/src/components/gui/gui.jsx';
+import GUIContainer from '@scratch/scratch-gui/src/containers/gui.jsx';
 import AppStateHOC  from '@scratch/scratch-gui/src/lib/app-state-hoc.jsx';
 
+// Some initializer helpers & a11y hook live in src/index.js
+export { initLocale, initFullScreen, initPlayer, setAppElement } from '@scratch/scratch-gui/src/index.js';
+
 //
-// Project-state bits desktop needs
+// Project state bits (names are stable across recent GUIs)
 //
-import {
+export {
   LoadingStates,
   onFetchedProjectData,
   onLoadedProject,
@@ -38,40 +25,13 @@ import {
 } from '@scratch/scratch-gui/src/reducers/project-state';
 
 //
-// Modals
+// Modals (telemetry button etc.)
 //
-import {openTelemetryModal} from '@scratch/scratch-gui/src/reducers/modals';
+export { openTelemetryModal } from '@scratch/scratch-gui/src/reducers/modals';
 
-// Default export = *bare* GUI (not already wrapped)
-export default GUIComponent;
+// What desktop code expects:
+export const GUIComponent = GUIContainer;     // named export
+export { AppStateHOC };                       // named export
 
-export {
-  // components / HOCs
-  GUIComponent,
-  AppStateHOC,
-
-  // boot helpers + initial states
-  setAppElement,
-  initLocale,
-  initFullScreen,
-  initPlayer,
-  initEmbedded,
-  guiInitialState,
-  localesInitialState,
-
-  // project-state bits
-  LoadingStates,
-  onFetchedProjectData,
-  onLoadedProject,
-  requestNewProject,
-  requestProjectUpload,
-  setProjectId,
-  defaultProjectId,
-
-  // modals
-  openTelemetryModal
-};
-
-// Back-compat aliases many desktop branches still call
-export const openLoadingProject  = onFetchedProjectData;
-export const closeLoadingProject = onLoadedProject;
+// Keep default export so `import GUI from '@scratch-gui-adapter'` would also work
+export default GUIContainer;

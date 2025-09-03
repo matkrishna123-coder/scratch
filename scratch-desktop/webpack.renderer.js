@@ -79,6 +79,10 @@ const template = fsExtra.readFileSync('src/renderer/index.html', {encoding: 'utf
 // Use the GUI package root everywhere (works with published pkg or local folder)
 const GUI_ROOT = resolvePackageDir('@scratch/scratch-gui');
 
+
+const RENDER_ROOT = fs.existsSync(
+  path.join(GUI_ROOT, 'node_modules', 'scratch-render', 'package.json')
+) ? path.join(GUI_ROOT, 'node_modules', 'scratch-render') : null;
 // Prefer a workspace-local scratch-vm; otherwise try the GUI's own node_modules
 const VM_ROOT =
   safePkgRoot('scratch-vm') ||
@@ -128,7 +132,15 @@ module.exports = makeConfig(
     module: {
       rules: [
         { test: /\.node$/, use: 'node-loader' },
-        { test: /\.(html)$/, use: { loader: 'html-loader' } }
+        { test: /\.(html)$/, use: { loader: 'html-loader' } },
+        
+        
+    {
+      test: /\.(svg|png|gif|jpe?g|woff2?|ttf|eot)$/i,
+      type: 'asset/resource',
+      generator: { filename: 'static/assets/[name].[contenthash][ext]' }
+    }, 
+
       ]
     }
   },
@@ -137,7 +149,7 @@ module.exports = makeConfig(
     useReact: true,
     // Let makeConfig set up default rules; we only extend inclusion paths for Babel
     //disableDefaultRulesForExtensions: ['js', 'jsx', 'css', 'svg', 'png', 'wav', 'gif', 'jpg', 'ttf'],
-    disableDefaultRulesForExtensions: ['js', 'jsx'],
+    disableDefaultRulesForExtensions: ['js', 'jsx','css'],
     babelPaths: [
       path.resolve(__dirname, 'src', 'renderer'),
 
@@ -170,13 +182,26 @@ module.exports = makeConfig(
             noErrorOnMissing: true
           },
           // Extension worker (may not exist in local src)
+          // {
+          //   from: 'extension-worker.{js,js.map}',
+          //   context: GUI_ROOT,
+          //   from: 'chunks/fetch-worker.*.{js,js.map}',
+          //   to: 'chunks',
+          //   noErrorOnMissing: true
+          // },
+
           {
-            from: 'extension-worker.{js,js.map}',
-            context: GUI_ROOT,
-            from: 'chunks/fetch-worker.*.{js,js.map}',
-            to: 'chunks',
-            noErrorOnMissing: true
-          },
+      from: 'extension-worker.{js,js.map}',
+      context: GUI_ROOT,
+      noErrorOnMissing: true
+    },
+    // 🔧 separate object (don’t overwrite the previous one)
+    {
+      from: 'chunks/fetch-worker.*.{js,js.map}',
+      context: GUI_ROOT,
+      to: 'chunks',
+      noErrorOnMissing: true
+    },
           // Libraries: present in published GUI; may be absent in local src
           {
             from: path.join(GUI_ROOT, 'libraries'),

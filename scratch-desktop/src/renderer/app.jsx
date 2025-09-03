@@ -1,30 +1,22 @@
 import React from 'react';
 import {render} from 'react-dom';
 
+// Ensure the renderer class is registered so the VM can attach a renderer
+import 'scratch-render';
+
 import {
-  GUIComponent as GUI,
+  GUIComponent as GUI,   // this is the *container* from your adapter shim
   AppStateHOC,
-  setAppElement,
-  initLocale,
-  initFullScreen,
-  initPlayer,
-  guiInitialState,
-  localesInitialState
+  setAppElement
 } from '@scratch-gui-adapter';
 
 import ScratchDesktopGUIHOC from './ScratchDesktopGUIHOC.jsx';
 
-// Wrap GUI with desktop HOC + app-state HOC (same pattern as upstream)
+// Compose: desktop HOC around the GUI container, then the AppState HOC
 const Wrapped = AppStateHOC(ScratchDesktopGUIHOC(GUI));
 
-// Tell react-modal which element is the app root (a11y)
-setAppElement(document.getElementById('app'));
+const root = document.getElementById('app');
+setAppElement(root);
 
-// Initialize GUI bits in the expected order
-initFullScreen(guiInitialState);
-// IMPORTANT: initLocale expects a messagesByLocale map, not the whole reducer state
-initLocale((localesInitialState && localesInitialState.messagesByLocale) || {});
-initPlayer(guiInitialState);
-
-// Mount the app
-render(<Wrapped isScratchDesktop />, document.getElementById('app'));
+// Render the editor
+render(<Wrapped isScratchDesktop />, root);
