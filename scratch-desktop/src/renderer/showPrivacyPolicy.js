@@ -1,13 +1,28 @@
-import {ipcRenderer} from 'electron';
+// src/renderer/showPrivacyPolicy.js
+
+// Don’t import from 'electron' in the renderer when nodeIntegration=false.
+// Use the preload bridge exposed on `window.desktop`.
+const {desktop} = window;
+const ipc = desktop && desktop.ipc;
 
 const showPrivacyPolicy = event => {
-    if (event) {
-        // Probably a click on a link; don't actually follow the link in the `href` attribute.
-        event.preventDefault();
+  if (event && event.preventDefault) event.preventDefault();
+
+  if (ipc) {
+    // Ask main process to open the dedicated Privacy window
+    ipc.send('open-privacy-policy-window');
+  } else {
+    // Fallback: navigate this window to the privacy route
+    // (useful if the preload bridge isn’t available in dev)
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set('route', 'privacy');
+      window.location.href = url.toString();
+    } catch {
+      // last-resort no-op
     }
-    // tell the main process to open the privacy policy window
-    ipcRenderer.send('open-privacy-policy-window');
-    return false;
+  }
+  return false;
 };
 
 export default showPrivacyPolicy;

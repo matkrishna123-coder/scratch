@@ -139,13 +139,16 @@ const getIsProjectSave = downloadItem =>
 // Window creation
 // ------------------------------------------------------------
 const createWindow = ({search = null, url = 'index.html', ...browserWindowOptions}) => {
+    const preloadPath = path.join(__dirname, 'preload.js');
+    console.log('Main process: using preload =>', preloadPath, 'exists=', fs.existsSync(preloadPath));
     const window = new BrowserWindow({
         useContentSize: true,
         show: false,
         webPreferences: {
             contextIsolation: true,
             nodeIntegration: false,
-            preload: path.join(__dirname, 'preload.js') // ensure dist/main/preload.js exists
+            sandbox: false,
+            preload: preloadPath             // ensure dist/main/preload.js exists
         },
         ...browserWindowOptions
     });
@@ -250,6 +253,10 @@ const createUsbWindow = () => {
         if (selectedDeviceCallback) selectedDeviceCallback(message);
         window.hide();
     });
+    ipcMain.handle('dialog:showMessageBox', (event, options) => {
+  const bw = BrowserWindow.fromWebContents(event.sender) || null;
+  return dialog.showMessageBox(bw, options);
+});
 
     return window;
 };

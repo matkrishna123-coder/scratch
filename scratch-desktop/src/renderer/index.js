@@ -1,37 +1,52 @@
-// This file does async imports of the heavy JSX, especially app.jsx, to avoid blocking the first render.
-// The main index.html just contains a loading/splash screen which will display while this import loads.
+// src/renderer/index.js
+// Async-load the heavy routes (esp. app.jsx) so the splash screen in index.html
+// can show immediately while the bundles are fetched.
 
-import {ipcRenderer} from 'electron';
+// ⚠️ Do NOT import from 'electron' here. With contextIsolation on and
+// nodeIntegration off, use the preload bridge instead:
+const {desktop} = window;
+const ipcRenderer = desktop?.ipc;
+const ipc = desktop && desktop.ipc;
 
 import ReactDOM from 'react-dom';
 import log from '../common/log.js';
 
-ipcRenderer.on('ready-to-show', () => {
-    // Start without any element in focus, otherwise the first link starts with focus and shows an orange box.
-    // We shouldn't disable that box or the focus behavior in case someone wants or needs to navigate that way.
-    // This seems like a hack... maybe there's some better way to do avoid any element starting with focus?
-    document.activeElement.blur();
-});
+// Wait for the main process to say the window is ready, if the bridge exists.
+if (ipc && typeof ipc.on === 'function') {
+  ipc.on('ready-to-show', () => {
+    // Start without any element in focus; otherwise first link might appear focused.
+    try {
+      document.activeElement && document.activeElement.blur();
+    } catch (_) { /* ignore */ }
+  });
+}
 
 const route = new URLSearchParams(window.location.search).get('route') || 'app';
+
 let routeModulePromise;
 switch (route) {
-case 'app':
+  case 'app':
     routeModulePromise = import('./app.jsx');
     break;
-case 'about':
+  case 'about':
     routeModulePromise = import('./about.jsx');
     break;
-case 'privacy':
+  case 'privacy':
     routeModulePromise = import('./privacy.jsx');
     break;
-case 'usb':
+  case 'usb':
     routeModulePromise = import('./usb.jsx');
+    break;
+  default:
+    // Fallback to app for unknown routes
+    routeModulePromise = import('./app.jsx');
     break;
 }
 
-routeModulePromise.then(routeModule => {
+routeModulePromise
+  .then(routeModule => {
     const appTarget = document.getElementById('app');
     const routeElement = routeModule.default;
     ReactDOM.render(routeElement, appTarget);
-}).catch(error => log.error('Error rendering app: ', error));
+  })
+  .catch(error => log.error('Error rendering app: ', error));

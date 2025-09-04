@@ -8,7 +8,12 @@
   "main": "./dist/main/main.js",
   "scripts": {
     "clean": "rimraf ./dist ./static/fetched",
-    "start": "node scripts/start.js",
+    "dev:renderer": "cross-env NODE_ENV=development webpack serve --config webpack.renderer.js --port 8601 --hot --history-api-fallback",
+    "dev:main": "cross-env NODE_ENV=development webpack --config webpack.main.js --watch",
+    "dev:electron": "wait-on http://localhost:8601/index.html && electron ./dist/main/main.js",
+    "dev:electron:trace": "wait-on http://localhost:8601/index.html && cross-env ELECTRON_ENABLE_LOGGING=1 ELECTRON_ENABLE_STACK_DUMPING=1 electron --trace-deprecation --trace-warnings ./dist/main/main.js",
+    "start": "run-p dev:renderer dev:main dev:electron",
+    "start:trace": "run-p dev:renderer dev:main dev:electron:trace",
     "compile:renderer": "webpack --config webpack.renderer.js",
     "compile:main": "webpack --config webpack.main.js",
     "compile": "npm run compile:renderer && npm run compile:main",
@@ -20,6 +25,7 @@
     "doBuild": "node ./scripts/electron-builder-wrapper.js",
     "dist": "npm run clean && npm run fetch && npm run build:dist",
     "distDev": "npm run clean && npm run fetch && npm run build:dev",
+    "start:prod": "npm run build && cross-env NODE_ENV=production electron ./dist/main/main.js",
     "test": "npm run test:lint",
     "test:lint": "eslint --cache --color --ext .jsx,.js ."
   },
@@ -45,6 +51,7 @@
     "babel-eslint": "10.1.0",
     "babel-loader": "9.2.1",
     "babel-plugin-react-intl": "7.9.4",
+    "buffer": "^6.0.3",
     "chalk": "4.1.2",
     "copy-webpack-plugin": "6.4.1",
     "cross-env": "7.0.3",
@@ -58,6 +65,8 @@
     "eslint-config-scratch": "9.0.9",
     "eslint-plugin-import": "2.32.0",
     "eslint-plugin-react": "7.37.5",
+    "events": "^3.3.0",
+    "file-loader": "^6.2.0",
     "fs-extra": "9.1.0",
     "html-loader": "0.5.5",
     "html-webpack-plugin": "5.6.4",
@@ -70,16 +79,22 @@
     "minimist": "1.2.8",
     "mkdirp": "1.0.4",
     "nets": "3.2.0",
+    "npm-run-all": "^4.1.5",
+    "path-browserify": "^1.0.1",
     "postcss-import": "12.0.1",
     "postcss-loader": "4.3.0",
     "postcss-simple-vars": "5.0.2",
+    "process": "^0.11.10",
     "react": "16.14.0",
     "react-dom": "16.14.0",
     "react-intl": "2.9.0",
     "react-redux": "5.1.2",
     "redux": "3.7.2",
     "rimraf": "3.0.2",
+    "scratch-render": "^2.0.571",
+    "scratch-vm": "file:../scratch-vm",
     "style-loader": "4.0.0",
+    "url": "^0.11.4",
     "url-loader": "4.1.1",
     "uuid": "8.3.2",
     "wait-on": "8.0.4",
@@ -90,5 +105,24 @@
   },
   "resolutions": {
     "upath": "1.2.0"
+  },
+  "overrides": {
+    "scratch-vm": "file:../scratch-vm"
+  },
+  "build": {
+    "files": [
+      "dist/**/*",
+      "static/**/*",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "dist/renderer/static/assets/face/**",
+      "static/assets/face/**"
+    ],
+    "mac": {
+      "extendInfo": {
+        "NSCameraUsageDescription": "Scratch needs camera access for video sensing and face detection."
+      }
+    }
   }
 }

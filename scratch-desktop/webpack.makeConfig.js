@@ -6,6 +6,7 @@ const util = require('util');
 const electronPath = require('electron');
 const webpack = require('webpack');
 const merge = require('webpack-merge');
+const fsExtra = require('fs-extra');
 
 const isProduction = (process.env.NODE_ENV === 'production');
 
@@ -138,13 +139,18 @@ const makeConfig = function (defaultConfig, options) {
     if (!process.env.CI) {
         config.plugins.push(new webpack.ProgressPlugin());
     }
+const outDir = path.resolve(__dirname, 'dist');
+fsExtra.ensureDirSync(outDir);
 
-    fs.writeFileSync(
-        `dist/webpack.${options.name}.js`,
-        `module.exports = ${util.inspect(config, {depth: null})};\n`
-    );
-
+    // fs.writeFileSync(
+    //     `dist/webpack.${options.name}.js`,
+    //     `module.exports = ${util.inspect(config, {depth: null})};\n`
+    // );
+    // fs.writeFileSync(path.join(outDir, `webpack.${options.name || 'config'}.js`), prettyPrintedConfig);
     return config;
 };
 
 module.exports = makeConfig;
+
+
+

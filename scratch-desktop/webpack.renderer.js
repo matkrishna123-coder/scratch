@@ -1,62 +1,32 @@
+/* eslint-disable global-require */
 const path = require('path');
 const fs = require('fs');
 const fsExtra = require('fs-extra');
 
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
+const webpack = require('webpack');
+
 const makeConfig = require('./webpack.makeConfig.js');
 
-// Resolve to the directory containing a module's package.json
-const getModulePath = moduleName =>
-    path.dirname(require.resolve(`${moduleName}/package.json`));
-
+/* ------------------------- helpers ------------------------- */
+function resolvePackageDir(pkg) {
+  return path.dirname(require.resolve(`${pkg}/package.json`));
+}
 function safePkgRoot(pkg) {
   try { return path.dirname(require.resolve(`${pkg}/package.json`)); }
   catch (_) { return null; }
 }
 
-// Helpers to reliably locate package roots
-function resolvePackageDir(pkg) {
-  return path.dirname(require.resolve(`${pkg}/package.json`));
-}
-
-// (Kept for future use if you ever want to import GUI's entry directly)
-// Prefers dist/scratch-gui.js, falls back to src/index.js
-function resolveGuiEntry() {
-  const guiRoot = resolvePackageDir('@scratch/scratch-gui');
-  const distPath = path.join(guiRoot, 'dist', 'scratch-gui.js');
-  try { return require.resolve(distPath); } catch (_) {}
-  const srcPath = path.join(guiRoot, 'src', 'index.js');
-  try { return require.resolve(srcPath); } catch (e) {
-    throw new Error(
-      `Could not resolve @scratch/scratch-gui entry. Tried:\n` +
-      ` - ${distPath}\n` +
-      ` - ${srcPath}\n`
-    );
-  }
-}
-
-// const generateIndexFile = template => {
-//   let html = template;
-//   html = html.replace(
-//     '</head>',
-//     '<script>require("source-map-support/source-map-support.js").install()</script></head>'
-//   );
-//   const filePath = path.join('dist', '.renderer-index-template.html');
-//   fsExtra.outputFileSync(filePath, html);
-//   return `!!html-loader?minimize=false&attributes=false!${filePath}`;
-// };
-
-// -------------------------------------new -------------------------------
+/* ---- inject tiny bootstrap into index.html (for source maps) ---- */
 const generateIndexFile = template => {
   let html = template;
   html = html.replace(
     '</head>',
     `
     <script>
-      // Make Node's \`global\` available for Webpack/runtime & Node-y deps
+      // Expose "global" to any Node-y dependency that expects it
       window.global = window;
-      // Only call Electron's require if it's actually available
       try {
         if (window.require) {
           window.require('source-map-support/source-map-support.js').install();
@@ -68,157 +38,205 @@ const generateIndexFile = template => {
   );
   const filePath = path.join('dist', '.renderer-index-template.html');
   fsExtra.outputFileSync(filePath, html);
-//  return \`!!html-loader?minimize=false&attributes=false!\${filePath}\`;
   return `!!html-loader?minimize=false&attributes=false!${filePath}`;
 };
 
-
-
+/* -------------------- order matters below -------------------- */
 const template = fsExtra.readFileSync('src/renderer/index.html', {encoding: 'utf8'});
 
-// Use the GUI package root everywhere (works with published pkg or local folder)
+/** MUST exist before anything that depends on it */
 const GUI_ROOT = resolvePackageDir('@scratch/scratch-gui');
 
+/** Where the real fetch-worker lives (hashed filename) */
+const STORAGE_CHUNKS_WEB = path.join(
+  GUI_ROOT, 'node_modules', 'scratch-storage', 'dist', 'web', 'chunks'
+);
 
-const RENDER_ROOT = fs.existsSync(
-  path.join(GUI_ROOT, 'node_modules', 'scratch-render', 'package.json')
-) ? path.join(GUI_ROOT, 'node_modules', 'scratch-render') : null;
-// Prefer a workspace-local scratch-vm; otherwise try the GUI's own node_modules
+/** Prefer a workspace-local VM; else use GUI’s node_modules */
 const VM_ROOT =
   safePkgRoot('scratch-vm') ||
   (fs.existsSync(path.join(GUI_ROOT, 'node_modules', 'scratch-vm', 'package.json'))
     ? path.join(GUI_ROOT, 'node_modules', 'scratch-vm')
     : null);
 
+/* ------------------------- config ------------------------- */
 module.exports = makeConfig(
   {
     target: 'electron-renderer',
-    entry: {
-      // desktop’s renderer; it imports GUI pieces internally
-      renderer: './src/renderer/index.js'
-      // If you ever need to point directly at GUI, use:
-      // renderer: resolveGuiEntry()
-    },
     context: path.resolve(__dirname),
+
+    entry: {
+      renderer: './src/renderer/index.js'
+    },
+
+    // Let webpack know this is an Electron renderer build; don’t pull core Node polyfills automatically
+    externalsPresets: { electronRenderer: true, node: false },
+
+    // Keep externals minimal so WDS client can bundle
+    externals: {
+      'source-map-support': 'commonjs2 source-map-support'
+    },
+
     resolve: {
       extensions: ['.js', '.jsx', '.json'],
+      // Prefer browser fields to avoid server/Node variants (e.g., jsdom)
+      mainFields: ['browser', 'module', 'main'],
+
       alias: {
-        // adapter we created that re-exports what desktop needs from GUI source
+        // Adapter that re-exports what desktop needs from GUI source
         '@scratch-gui-adapter$': path.resolve(__dirname, 'src/renderer/shims/scratch-gui-adapter.js'),
-        // only set this if we found a VM root; avoid require.resolve at config-load time
+        // Guard so accidental `import 'electron'` in renderer won't break (must exist if you keep it)
+        electron$: path.resolve(__dirname, 'src/renderer/shims/electron-guard.js'),
+
+        // Only set this if we found a VM root
         ...(VM_ROOT ? { 'scratch-vm$': VM_ROOT } : {}),
+
+        // Force single React copy
         react: path.resolve(__dirname, 'node_modules/react'),
-        'react-dom': path.resolve(__dirname, 'node_modules/react-dom')
-        // If you ever want to force GUI entry:
-        // '@scratch/scratch-gui$': resolveGuiEntry()
+        'react-dom': path.resolve(__dirname, 'node_modules/react-dom'),
+
+        // Hard-disable server-only libs that sometimes sneak in
+        jsdom$: false,
+        'http-proxy-agent$': false,
+        'https-proxy-agent$': false,
+        'agent-base$': false
       },
+
+      // Webpack 5: explicitly polyfill only what dev client needs; stub the rest
       fallback: {
-    canvas: false
-  }
+        // Needed by webpack-dev-server client / HMR
+        events: require.resolve('events/'),
+        process: require.resolve('process/browser'),
+        buffer: require.resolve('buffer/'),
+        url: require.resolve('url/'),
+
+        // Optional: allow safe usage of path in the browser
+        path: require.resolve('path-browserify'),
+
+        // Everything Node-only -> stub out to avoid bundling & errors
+        assert: false,
+        child_process: false,
+        crypto: false,
+        fs: false,
+        http: false,
+        https: false,
+        net: false,
+        os: false,
+        stream: false,
+        string_decoder: false,
+        tls: false,
+        util: false,
+        vm: false,
+        zlib: false,
+
+        canvas: false
+      }
     },
-    externals: [
-      'source-map-support',
-      'electron',
-      'webpack'
-    ],
+
     output: {
       filename: '[name].js',
-      assetModuleFilename: 'static/assets/[name].[hash][ext]',
       chunkFilename: '[name].bundle.js',
-      libraryTarget: 'commonjs2',
+      assetModuleFilename: 'static/assets/[name].[hash][ext]',
       path: path.resolve(__dirname, 'dist/renderer'),
-      globalObject: 'globalThis'   // <-- add this
+      publicPath: '/',
+      globalObject: 'globalThis'
     },
+
     module: {
       rules: [
         { test: /\.node$/, use: 'node-loader' },
         { test: /\.(html)$/, use: { loader: 'html-loader' } },
-        
-        
-    {
-      test: /\.(svg|png|gif|jpe?g|woff2?|ttf|eot)$/i,
-      type: 'asset/resource',
-      generator: { filename: 'static/assets/[name].[contenthash][ext]' }
-    }, 
-
+        {
+          test: /\.(svg|png|gif|jpe?g|woff2?|ttf|eot)$/i,
+          type: 'asset/resource',
+          generator: { filename: 'static/assets/[name].[contenthash][ext]' }
+        }
       ]
+    },
+
+    plugins: [
+      // Drop any accidental Node/server-only imports
+      new webpack.IgnorePlugin({ resourceRegExp: /^jsdom$/ }),
+      new webpack.IgnorePlugin({ resourceRegExp: /^(http|https)-proxy-agent$/ }),
+      new webpack.IgnorePlugin({ resourceRegExp: /^agent-base$/ }),
+
+      // Provide shims needed by WDS client & some libs
+      new webpack.ProvidePlugin({
+        process: 'process/browser',
+        Buffer: ['buffer', 'Buffer']
+      }),
+
+      new HtmlWebpackPlugin({
+        filename: 'index.html',
+        template: generateIndexFile(template),
+        minify: false
+      }),
+
+      // Copy assets needed at runtime (dev server serves them from memory; prod writes to disk)
+      new CopyWebpackPlugin({
+        patterns: [
+          // static assets (GUI may place them in root or dist/static)
+          { from: path.join(GUI_ROOT, 'static'),            to: 'static', noErrorOnMissing: true },
+          { from: path.join(GUI_ROOT, 'dist', 'static'),    to: 'static', noErrorOnMissing: true },
+
+          // extension worker (handle either location)
+          { from: path.join(GUI_ROOT, 'extension-worker.js'),        to: 'extension-worker.js',     noErrorOnMissing: true },
+          { from: path.join(GUI_ROOT, 'extension-worker.js.map'),    to: 'extension-worker.js.map', noErrorOnMissing: true },
+          { from: path.join(GUI_ROOT, 'dist', 'extension-worker.js'),     to: 'extension-worker.js',     noErrorOnMissing: true },
+          { from: path.join(GUI_ROOT, 'dist', 'extension-worker.js.map'), to: 'extension-worker.js.map', noErrorOnMissing: true },
+
+          // fetch-worker from scratch-storage (actual location with hashed filename)
+          { from: path.join(STORAGE_CHUNKS_WEB, 'fetch-worker.*.js'),     to: 'chunks/[name][ext]', noErrorOnMissing: true },
+          { from: path.join(STORAGE_CHUNKS_WEB, 'fetch-worker.*.js.map'), to: 'chunks/[name][ext]', noErrorOnMissing: true },
+
+          // optional: other GUI chunks (tutorials/translations, etc.) – keep ONE of these to avoid duplicates
+          { from: path.join(GUI_ROOT, 'chunks'), to: 'chunks', noErrorOnMissing: true },
+
+          // libraries (present in published GUI)
+          { from: path.join(GUI_ROOT, 'libraries'), to: 'static/libraries', flatten: true, noErrorOnMissing: true }
+        ]
+      })
+    ],
+
+    // Dev server: serve ONLY the compiled output to avoid double-serving the same URLs
+    devServer: {
+      hot: true,
+      historyApiFallback: true,
+      static: false,
+      // static: {
+      //   directory: path.resolve(__dirname, 'dist/renderer'),
+      //   publicPath: '/',
+      //   watch: true
+      // },
+      devMiddleware: {  publicPath: '/', writeToDisk: false },
+      client: { overlay: true }
     }
   },
+
+  /* -------- makeConfig options -------- */
   {
     name: 'renderer',
     useReact: true,
-    // Let makeConfig set up default rules; we only extend inclusion paths for Babel
-    //disableDefaultRulesForExtensions: ['js', 'jsx', 'css', 'svg', 'png', 'wav', 'gif', 'jpg', 'ttf'],
-    disableDefaultRulesForExtensions: ['js', 'jsx','css'],
+    // Keep default CSS rules; only replace JS rules (we supply babelPaths)
+    disableDefaultRulesForExtensions: ['js', 'jsx'],
     babelPaths: [
       path.resolve(__dirname, 'src', 'renderer'),
 
       // Transpile @scratch/* package source (when linked)
       /node_modules[\\/]+@scratch[\\/]+[^\\/]+[\\/]+src/,
 
-      // Explicitly include these common source roots
+      // Common source roots
       /node_modules[\\/]@scratch[\\/]scratch-gui[\\/]src/,
       /node_modules[\\/]scratch-paint[\\/]src/,
 
-      // Include VM source if we found a root
+      // Include VM source if present
       ...(VM_ROOT ? [ path.join(VM_ROOT, 'src') ] : []),
 
-      // Other known deps used by desktop
+      // Other known deps
       /node_modules[\\/]+pify/,
       /node_modules[\\/]+@vernier[\\/]+godirect/
-    ],
-    plugins: [
-      new HtmlWebpackPlugin({
-        filename: 'index.html',
-        template: generateIndexFile(template),
-        minify: false
-      }),
-      new CopyWebpackPlugin({
-        patterns: [
-          // GUI static assets (includes your face assets in static/assets/face)
-          {
-            from: path.join(GUI_ROOT, 'static'),
-            to: 'static',
-            noErrorOnMissing: true
-          },
-          // Extension worker (may not exist in local src)
-          // {
-          //   from: 'extension-worker.{js,js.map}',
-          //   context: GUI_ROOT,
-          //   from: 'chunks/fetch-worker.*.{js,js.map}',
-          //   to: 'chunks',
-          //   noErrorOnMissing: true
-          // },
-
-          {
-      from: 'extension-worker.{js,js.map}',
-      context: GUI_ROOT,
-      noErrorOnMissing: true
-    },
-    // 🔧 separate object (don’t overwrite the previous one)
-    {
-      from: 'chunks/fetch-worker.*.{js,js.map}',
-      context: GUI_ROOT,
-      to: 'chunks',
-      noErrorOnMissing: true
-    },
-          // Libraries: present in published GUI; may be absent in local src
-          {
-            from: path.join(GUI_ROOT, 'libraries'),
-            to: 'static/libraries',
-            flatten: true,
-            noErrorOnMissing: true
-          },
-          // Tutorial translation chunks: present in published GUI; optional in local src
-          {
-            from: path.join(GUI_ROOT, 'chunks'),
-            to: 'chunks',
-            noErrorOnMissing: true
-          }
-          // If needed, you can also copy from GUI src:
-          // { from: path.join(GUI_ROOT, 'src', 'lib', 'libraries'), to: 'static/libraries', noErrorOnMissing: true }
-        ]
-      })
     ]
   }
 );
+
+
