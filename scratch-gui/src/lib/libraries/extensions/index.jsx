@@ -298,6 +298,19 @@ export default [
    description: 'Detect faces with the camera. Train & recognize.',
    featured: true
  },
+{
+  name: 'Body Parts',
+  extensionId: 'pose',
+//   iconURL: require('./icons/video.svg'),
+ iconURL: wedo2IconURL,
+  insetIconURL: null,
+  description: 'Detect body parts and poses with your camera.',
+  featured: true,
+  disabled: false,
+  launchPeripheralConnectionFlow: false,
+  internetConnectionRequired: false,
+  useAutoRun: false
+},
     {
         name: 'Go Direct Force & Acceleration',
         extensionId: 'gdxfor',

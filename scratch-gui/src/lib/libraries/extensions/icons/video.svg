@@ -1,0 +1,5 @@
+<!-- C:\scratch\scratch-gui\src\lib\libraries\extensions\icons\video.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect x="8" y="16" width="36" height="24" rx="4" ry="4" fill="#575E75"/>
+  <polygon points="46,24 56,20 56,44 46,40" fill="#8AA0FF"/>
+</svg>

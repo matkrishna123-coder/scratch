@@ -10151,7 +10151,9 @@ const builtinExtensions = {
   ev3: () => __webpack_require__(/*! ../extensions/scratch3_ev3 */ "./src/extensions/scratch3_ev3/index.js"),
   makeymakey: () => __webpack_require__(/*! ../extensions/scratch3_makeymakey */ "./src/extensions/scratch3_makeymakey/index.js"),
   boost: () => __webpack_require__(/*! ../extensions/scratch3_boost */ "./src/extensions/scratch3_boost/index.js"),
-  gdxfor: () => __webpack_require__(/*! ../extensions/scratch3_gdx_for */ "./src/extensions/scratch3_gdx_for/index.js")
+  gdxfor: () => __webpack_require__(/*! ../extensions/scratch3_gdx_for */ "./src/extensions/scratch3_gdx_for/index.js"),
+  face: () => __webpack_require__(/*! ../extensions/scratch3_face */ "./src/extensions/scratch3_face/index.js"),
+  pose: runtime => new (__webpack_require__(/*! ../extensions/scratch3_pose */ "./src/extensions/scratch3_pose/index.js"))(runtime)
 };
 
 /**
@@ -13780,6 +13782,509 @@ class Scratch3Ev3Blocks {
   }
 }
 module.exports = Scratch3Ev3Blocks;
+
+/***/ }),
+
+/***/ "./src/extensions/scratch3_face/index.js":
+/*!***********************************************!*\
+  !*** ./src/extensions/scratch3_face/index.js ***!
+  \***********************************************/
+/***/ ((module, __unused_webpack_exports, __webpack_require__) => {
+
+const ArgumentType = __webpack_require__(/*! ../../extension-support/argument-type */ "./src/extension-support/argument-type.js");
+const BlockType = __webpack_require__(/*! ../../extension-support/block-type */ "./src/extension-support/block-type.js");
+class Scratch3Face {
+  constructor(runtime) {
+    this.runtime = runtime;
+
+    // State
+    this._cameraOn = false;
+    this._detections = []; // [{x,y,w,h, landmarks:[{x,y},...]}]
+    this._facesCountCached = 0;
+
+    // Simple recognition DB
+    this._db = Object.create(null);
+    this._threshold = 0.85;
+    this._targetFPS = 15;
+
+    // MediaPipe landmarker & frame info
+    this._landmarker = null;
+    this._frameW = 0;
+    this._frameH = 0;
+
+    // Overlay flags
+    this._drawBoxes = false;
+    this._drawLandmarks = false;
+
+    // Tick state
+    this._lastTick = 0;
+    this._loopStarted = false;
+
+    // Start/stop hooks
+    runtime.on('PROJECT_RUN_START', () => this._kickLoop('PROJECT_RUN_START'));
+    runtime.on('PROJECT_RUN_STOP', () => {
+      this._emitOverlay(true);
+    });
+  }
+
+  // ---------------- Overlay toggles ----------------
+  drawBoxes(_ref) {
+    let {
+      ONOFF
+    } = _ref;
+    this._drawBoxes = String(ONOFF).toLowerCase() === 'on';
+    if (!this._drawBoxes && !this._drawLandmarks) this._emitOverlay(true);
+  }
+  drawLandmarks(_ref2) {
+    let {
+      ONOFF
+    } = _ref2;
+    this._drawLandmarks = String(ONOFF).toLowerCase() === 'on';
+    if (!this._drawBoxes && !this._drawLandmarks) this._emitOverlay(true);
+  }
+
+  // ---------------- Model loading ----------------
+  async _ensureModels() {
+    if (this._landmarker) return;
+    const base = this._assetBase(); // '/static/assets/face/' (http) or 'static/assets/face/' (file)
+    const tasksUrl = new URL('tasks-vision.js', base.startsWith('/') ? window.location.origin + base : window.location.href.replace(/[^/]*$/, '') + base).toString();
+    let tasks;
+    try {
+      tasks = await import(/* webpackIgnore: true */tasksUrl);
+    } catch (e) {
+      console.error('[face] tasks load failed', e, 'url:', tasksUrl);
+      throw e;
+    }
+    const {
+      FilesetResolver,
+      FaceLandmarker
+    } = tasks;
+    const files = await FilesetResolver.forVisionTasks(base + 'wasm/');
+    this._landmarker = await FaceLandmarker.createFromOptions(files, {
+      baseOptions: {
+        modelAssetPath: base + 'models/face_landmarker.task'
+      },
+      runningMode: 'IMAGE',
+      numFaces: 5,
+      outputFaceBlendshapes: false,
+      outputFacialTransformationMatrices: false
+    });
+    console.log('[face] landmarker ready');
+  }
+  _assetBase() {
+    const isHttp = /^https?:/i.test(window.location.href);
+    return isHttp ? '/static/assets/face/' : 'static/assets/face/';
+  }
+
+  // Try to get a canvas from the VM video device; fall back to <video>
+  _getFrame() {
+    var _this$runtime;
+    let size = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : 320;
+    const v = (_this$runtime = this.runtime) === null || _this$runtime === void 0 || (_this$runtime = _this$runtime.ioDevices) === null || _this$runtime === void 0 ? void 0 : _this$runtime.video;
+    if (!v) return null;
+
+    // Canvas path (preferred)
+    try {
+      const c = v.getFrame({
+        format: 'canvas',
+        width: size,
+        height: size
+      });
+      if (c && typeof c.getContext === 'function') return c; // HTMLCanvasElement
+    } catch (_) {}
+
+    // Some builds return canvas without specifying format
+    try {
+      const c = v.getFrame({
+        width: size,
+        height: size
+      });
+      if (c && typeof c.getContext === 'function') return c;
+    } catch (_) {}
+
+    // Fallback: underlying <video>
+    const vid = v.provider && v.provider.video;
+    if (vid && vid.readyState >= 2) return vid; // HTMLVideoElement
+
+    return null;
+  }
+
+  // ---------------- Detection per tick ----------------
+  async _detectOnce() {
+    await this._ensureModels();
+    const frame = this._getFrame(320);
+    if (!frame) {
+      // Camera not ready yet; clear overlay once
+      this._detections = [];
+      this._facesCountCached = 0;
+      this._emitOverlay(true);
+      return;
+    }
+
+    // Normalize to a canvas source for the landmarker
+    let sourceCanvas = null;
+    if (typeof frame.getContext === 'function') {
+      // Already a canvas
+      sourceCanvas = frame;
+    } else {
+      // Likely a <video> element; draw it into a work canvas
+      if (!this._canvas) {
+        this._canvas = document.createElement('canvas');
+        this._ctx = this._canvas.getContext('2d');
+      }
+      const w = frame.videoWidth || frame.naturalWidth || frame.width || 320;
+      const h = frame.videoHeight || frame.naturalHeight || frame.height || 320;
+      if (this._canvas.width !== w || this._canvas.height !== h) {
+        this._canvas.width = w;
+        this._canvas.height = h;
+        console.log('[face] work canvas created', w, h);
+      }
+      this._ctx.drawImage(frame, 0, 0, this._canvas.width, this._canvas.height);
+      sourceCanvas = this._canvas;
+    }
+
+    // Detect landmarks
+    const res = this._landmarker.detect(sourceCanvas);
+    const W = sourceCanvas.width,
+      H = sourceCanvas.height;
+    this._frameW = W;
+    this._frameH = H;
+    const faces = (res === null || res === void 0 ? void 0 : res.faceLandmarks) || [];
+    this._detections = faces.map(lm => {
+      // lm points are normalized [0..1]; convert to pixels
+      let minx = Infinity,
+        miny = Infinity,
+        maxx = -Infinity,
+        maxy = -Infinity;
+      const px = lm.map(p => {
+        const x = p.x * W,
+          y = p.y * H;
+        if (x < minx) minx = x;
+        if (x > maxx) maxx = x;
+        if (y < miny) miny = y;
+        if (y > maxy) maxy = y;
+        return {
+          x,
+          y
+        };
+      });
+      return {
+        x: Math.round(minx),
+        y: Math.round(miny),
+        w: Math.round(maxx - minx),
+        h: Math.round(maxy - miny),
+        landmarks: px
+      };
+    });
+    this._facesCountCached = this._detections.length;
+    this._emitOverlay();
+  }
+
+  // ---------------- Landmark embedding ----------------
+  _getKeyIdxs() {
+    return [33, 263, 133, 362, 1, 4, 61, 291, 13, 14, 10, 152, 234, 454];
+  }
+  _embedFromLandmarks(lm) {
+    if (!lm || lm.length < 468) return null;
+    const idxs = this._getKeyIdxs();
+    const R_outer = lm[33],
+      L_outer = lm[263];
+    const cx = (R_outer.x + L_outer.x) / 2;
+    const cy = (R_outer.y + L_outer.y) / 2;
+    const eyeDist = Math.hypot(L_outer.x - R_outer.x, L_outer.y - R_outer.y) || 1;
+    const vec = [];
+    for (const i of idxs) {
+      const p = lm[i];
+      vec.push((p.x - cx) / eyeDist, (p.y - cy) / eyeDist);
+    }
+    const mouthL = lm[61],
+      mouthR = lm[291];
+    const nose = lm[1],
+      chin = lm[152];
+    const eyeInR = lm[133],
+      eyeInL = lm[362];
+    vec.push(Math.hypot(mouthR.x - mouthL.x, mouthR.y - mouthL.y) / eyeDist, Math.hypot(chin.x - nose.x, chin.y - nose.y) / eyeDist, Math.hypot(eyeInL.x - eyeInR.x, eyeInL.y - eyeInR.y) / eyeDist);
+
+    // L2-normalize
+    let norm = 0;
+    for (const v of vec) norm += v * v;
+    norm = Math.sqrt(norm) || 1;
+    for (let i = 0; i < vec.length; i++) vec[i] /= norm;
+    return new Float32Array(vec);
+  }
+
+  // ---------------- Tick loop (always schedules) ----------------
+  _tickLoop() {
+    const loop = async () => {
+      const now = performance.now();
+      const interval = 1000 / this._targetFPS;
+
+      // Only *process* when camera is on, but keep scheduling regardless
+      if (now - this._lastTick >= interval && this._cameraOn) {
+        try {
+          await this._detectOnce();
+        } catch (e) {
+          console.error('[face] detect error', e);
+        }
+        this._lastTick = now;
+      }
+
+      // Keep the loop alive even if the green flag isn't running
+      if (typeof window !== 'undefined') window.requestAnimationFrame(loop);else setTimeout(loop, 30);
+    };
+    loop();
+  }
+  _kickLoop(source) {
+    if (this._loopStarted) return;
+    this._loopStarted = true;
+    console.log('[face] tick loop start from', source);
+    this._tickLoop();
+  }
+
+  // ---------------- Overlay emit ----------------
+  _emitOverlay() {
+    let forceClear = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : false;
+    if (!this.runtime || !this._drawBoxes && !this._drawLandmarks && !forceClear) return;
+    const payload = {
+      src: 'face',
+      boxes: forceClear ? [] : this._drawBoxes ? this._detections.map(d => ({
+        x: d.x,
+        y: d.y,
+        w: d.w,
+        h: d.h
+      })) : [],
+      landmarks: forceClear ? [] : this._drawLandmarks ? this._detections.map(d => (d.landmarks || []).map(p => ({
+        x: Math.round(p.x),
+        y: Math.round(p.y)
+      }))) : [],
+      frameWidth: this._frameW || 0,
+      frameHeight: this._frameH || 0,
+      ts: Date.now()
+    };
+    this.runtime.emit('FACE_OVERLAY', payload);
+  }
+
+  // ---------------- Scratch surface ----------------
+  getInfo() {
+    return {
+      id: 'face',
+      name: 'Face Blocks',
+      color1: '#6A5ACD',
+      color2: '#4E3CC6',
+      blocks: [{
+        opcode: 'startCamera',
+        blockType: BlockType.COMMAND,
+        text: 'start camera'
+      }, {
+        opcode: 'stopCamera',
+        blockType: BlockType.COMMAND,
+        text: 'stop camera'
+      }, {
+        opcode: 'cameraReady',
+        blockType: BlockType.BOOLEAN,
+        text: 'camera ready?'
+      }, {
+        opcode: 'facesCount',
+        blockType: BlockType.REPORTER,
+        text: 'faces count'
+      }, {
+        opcode: 'faceDetected',
+        blockType: BlockType.BOOLEAN,
+        text: 'face [INDEX] detected?',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          }
+        }
+      }, {
+        opcode: 'faceX',
+        blockType: BlockType.REPORTER,
+        text: 'face [INDEX] x',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          }
+        }
+      }, {
+        opcode: 'faceY',
+        blockType: BlockType.REPORTER,
+        text: 'face [INDEX] y',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          }
+        }
+      }, {
+        opcode: 'faceW',
+        blockType: BlockType.REPORTER,
+        text: 'face [INDEX] width',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          }
+        }
+      }, {
+        opcode: 'faceH',
+        blockType: BlockType.REPORTER,
+        text: 'face [INDEX] height',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          }
+        }
+      }, {
+        opcode: 'drawBoxes',
+        blockType: BlockType.COMMAND,
+        text: 'draw boxes [ONOFF]',
+        arguments: {
+          ONOFF: {
+            type: ArgumentType.STRING,
+            defaultValue: 'on'
+          }
+        }
+      }, {
+        opcode: 'drawLandmarks',
+        blockType: BlockType.COMMAND,
+        text: 'draw landmarks [ONOFF]',
+        arguments: {
+          ONOFF: {
+            type: ArgumentType.STRING,
+            defaultValue: 'off'
+          }
+        }
+      }, {
+        opcode: 'trainFace',
+        blockType: BlockType.COMMAND,
+        text: 'train face [INDEX] as [LABEL]',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          },
+          LABEL: {
+            type: ArgumentType.STRING,
+            defaultValue: 'Alice'
+          }
+        }
+      }, {
+        opcode: 'recognizeAs',
+        blockType: BlockType.BOOLEAN,
+        text: 'recognize face [INDEX] as [LABEL]?',
+        arguments: {
+          INDEX: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 1
+          },
+          LABEL: {
+            type: ArgumentType.STRING,
+            defaultValue: 'Alice'
+          }
+        }
+      }]
+    };
+  }
+
+  // ---------------- Opcodes ----------------
+  startCamera() {
+    console.log('[face] startCamera called');
+    this.runtime.ioDevices.video.enableVideo();
+    this._cameraOn = true;
+    this._kickLoop('startCamera');
+    // Optional warm-up clear
+    setTimeout(() => this._emitOverlay(true), 100);
+  }
+  stopCamera() {
+    this.runtime.ioDevices.video.disableVideo();
+    this._cameraOn = false;
+    this._emitOverlay(true);
+  }
+  cameraReady() {
+    return !!this._cameraOn;
+  }
+  facesCount() {
+    return this._facesCountCached || 0;
+  }
+  faceDetected(_ref3) {
+    let {
+      INDEX
+    } = _ref3;
+    const i = Math.max(1, Math.floor(INDEX)) - 1;
+    return !!this._detections[i];
+  }
+  faceX(_ref4) {
+    let {
+      INDEX
+    } = _ref4;
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    return d ? d.x : 0;
+  }
+  faceY(_ref5) {
+    let {
+      INDEX
+    } = _ref5;
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    return d ? d.y : 0;
+  }
+  faceW(_ref6) {
+    let {
+      INDEX
+    } = _ref6;
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    return d ? d.w : 0;
+  }
+  faceH(_ref7) {
+    let {
+      INDEX
+    } = _ref7;
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    return d ? d.h : 0;
+  }
+  async trainFace(_ref8) {
+    var _this$_db;
+    let {
+      INDEX,
+      LABEL
+    } = _ref8;
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    if (!d || !LABEL) return;
+    const emb = this._embedFromLandmarks(d.landmarks);
+    if (!emb) return;
+    ((_this$_db = this._db)[LABEL] || (_this$_db[LABEL] = [])).push(emb);
+  }
+  async recognizeAs(_ref9) {
+    let {
+      INDEX,
+      LABEL
+    } = _ref9;
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    const arr = this._db[LABEL];
+    if (!d || !arr || arr.length === 0) return false;
+    const emb = this._embedFromLandmarks(d.landmarks);
+    if (!emb) return false;
+
+    // cosine similarity
+    let best = -1;
+    for (const v of arr) {
+      let dot = 0,
+        na = 0,
+        nb = 0;
+      for (let i = 0; i < v.length; i++) {
+        dot += v[i] * emb[i];
+        na += v[i] * v[i];
+        nb += emb[i] * emb[i];
+      }
+      const cos = dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
+      if (cos > best) best = cos;
+    }
+    return best >= (this._threshold || 0.85);
+  }
+}
+module.exports = Scratch3Face;
 
 /***/ }),
 
@@ -18732,6 +19237,439 @@ class Scratch3PenBlocks {
   }
 }
 module.exports = Scratch3PenBlocks;
+
+/***/ }),
+
+/***/ "./src/extensions/scratch3_pose/index.js":
+/*!***********************************************!*\
+  !*** ./src/extensions/scratch3_pose/index.js ***!
+  \***********************************************/
+/***/ ((module, __unused_webpack_exports, __webpack_require__) => {
+
+// scratch3_pose/index.js
+const ArgumentType = __webpack_require__(/*! ../../extension-support/argument-type */ "./src/extension-support/argument-type.js");
+const BlockType = __webpack_require__(/*! ../../extension-support/block-type */ "./src/extension-support/block-type.js");
+const formatMessage = __webpack_require__(/*! format-message */ "format-message");
+
+// Lazy-load MediaPipe Tasks (bundled or CDN)
+let _vision = null;
+let _pose = null;
+const PARTS = {
+  nose: 0,
+  left_eye: 2,
+  right_eye: 5,
+  left_ear: 7,
+  right_ear: 8,
+  left_shoulder: 11,
+  right_shoulder: 12,
+  left_elbow: 13,
+  right_elbow: 14,
+  left_wrist: 15,
+  right_wrist: 16,
+  left_hip: 23,
+  right_hip: 24,
+  left_knee: 25,
+  right_knee: 26,
+  left_ankle: 27,
+  right_ankle: 28,
+  leftHeel: 29,
+  rightHeel: 30,
+  leftFootIndex: 31,
+  rightFootIndex: 32
+};
+class Scratch3Pose {
+  constructor(runtime) {
+    if (!runtime) throw new Error('Scratch3Pose: runtime missing');
+    this.runtime = runtime;
+    this._video = null;
+    this._running = false;
+    this._targetFPS = 15;
+    this._lastTs = 0;
+    this._drawOverlay = false;
+    this._poses = []; // [{landmarks:[{x,y,z,visibility}], worldLandmarks:[], ...}]
+
+    // Stage size for mapping
+    this._stageW = 480;
+    this._stageH = 360;
+    runtime.on('PROJECT_RUN_START', () => this._kick() && this._kick());
+    runtime.on('PROJECT_RUN_STOP', () => {
+      this._running = false;
+      this._emitOverlay(true);
+    });
+  }
+  getInfo() {
+    return {
+      id: 'pose',
+      name: formatMessage({
+        default: 'Body Parts'
+      }),
+      blocks: [{
+        opcode: 'start',
+        blockType: BlockType.COMMAND,
+        text: 'start body detection (FPS [FPS])',
+        arguments: {
+          FPS: {
+            type: ArgumentType.NUMBER,
+            defaultValue: 15
+          }
+        }
+      }, {
+        opcode: 'stop',
+        blockType: BlockType.COMMAND,
+        text: 'stop body detection'
+      }, {
+        opcode: 'draw',
+        blockType: BlockType.COMMAND,
+        text: 'draw skeleton [ONOFF]',
+        arguments: {
+          ONOFF: {
+            type: ArgumentType.STRING,
+            menu: 'onoff',
+            defaultValue: 'on'
+          }
+        }
+      }, {
+        opcode: 'count',
+        blockType: BlockType.REPORTER,
+        text: 'bodies detected'
+      }, {
+        opcode: 'getX',
+        blockType: BlockType.REPORTER,
+        text: '[WHICH] X of [PART]',
+        arguments: {
+          WHICH: {
+            type: ArgumentType.STRING,
+            menu: 'which',
+            defaultValue: 'first'
+          },
+          PART: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_wrist'
+          }
+        }
+      }, {
+        opcode: 'getY',
+        blockType: BlockType.REPORTER,
+        text: '[WHICH] Y of [PART]',
+        arguments: {
+          WHICH: {
+            type: ArgumentType.STRING,
+            menu: 'which',
+            defaultValue: 'first'
+          },
+          PART: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_wrist'
+          }
+        }
+      }, {
+        opcode: 'getVis',
+        blockType: BlockType.REPORTER,
+        text: 'visibility of [PART]',
+        arguments: {
+          PART: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_wrist'
+          }
+        }
+      }, {
+        opcode: 'angleABC',
+        blockType: BlockType.REPORTER,
+        text: 'angle [A]-[B]-[C]',
+        arguments: {
+          A: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_shoulder'
+          },
+          B: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_elbow'
+          },
+          C: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_wrist'
+          }
+        }
+      }, {
+        opcode: 'dist',
+        blockType: BlockType.REPORTER,
+        text: 'distance [P1] to [P2]',
+        arguments: {
+          P1: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'left_wrist'
+          },
+          P2: {
+            type: ArgumentType.STRING,
+            menu: 'parts',
+            defaultValue: 'right_wrist'
+          }
+        }
+      }, {
+        opcode: 'isPose',
+        blockType: BlockType.BOOLEAN,
+        text: 'is pose [POSE] ?',
+        arguments: {
+          POSE: {
+            type: ArgumentType.STRING,
+            menu: 'poses',
+            defaultValue: 'Hands Up'
+          }
+        }
+      }],
+      menus: {
+        onoff: [{
+          text: 'on',
+          value: 'on'
+        }, {
+          text: 'off',
+          value: 'off'
+        }],
+        which: [{
+          text: 'first',
+          value: 'first'
+        }],
+        // extend to multi-body if needed
+        parts: Object.keys(PARTS).map(k => ({
+          text: k.replace(/_/g, ' '),
+          value: k
+        })),
+        poses: ['Hands Up', 'T-Pose', 'Tree'].map(p => ({
+          text: p,
+          value: p
+        }))
+      }
+    };
+  }
+  async _ensureModel() {
+    if (_pose) return;
+    // If bundling, import from node_modules; if CDN, use dynamic import('.../vision_bundle.mjs')
+    const vision = await import(/* webpackIgnore: true */'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.11/vision_bundle.mjs');
+    _vision = await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.11/wasm');
+    _pose = await vision.PoseLandmarker.createFromOptions(_vision, {
+      baseOptions: {
+        modelAssetPath: '/static/mediapipe/vision/models/pose_landmarker_lite.task'
+      },
+      runningMode: 'VIDEO',
+      numPoses: 1,
+      minPoseDetectionConfidence: 0.4,
+      minPosePresenceConfidence: 0.4,
+      minTrackingConfidence: 0.4
+    });
+  }
+  async start(args) {
+    this._targetFPS = Math.max(5, Math.min(60, Number(args.FPS) || 15));
+    await this._ensureModel();
+    // Reuse Scratch video device if available:
+    const video = await this._getVideo();
+    if (!video) return;
+    this._running = true;
+  }
+  stop() {
+    this._running = false;
+  }
+  draw(_ref) {
+    let {
+      ONOFF
+    } = _ref;
+    this._drawOverlay = String(ONOFF).toLowerCase() === 'on';
+  }
+  count() {
+    return this._poses.length | 0;
+  }
+  getX(_ref2) {
+    var _this$_getPartXY$x, _this$_getPartXY;
+    let {
+      WHICH,
+      PART
+    } = _ref2;
+    return (_this$_getPartXY$x = (_this$_getPartXY = this._getPartXY(PART)) === null || _this$_getPartXY === void 0 ? void 0 : _this$_getPartXY.x) !== null && _this$_getPartXY$x !== void 0 ? _this$_getPartXY$x : 0;
+  }
+  getY(_ref3) {
+    var _this$_getPartXY$y, _this$_getPartXY2;
+    let {
+      WHICH,
+      PART
+    } = _ref3;
+    return (_this$_getPartXY$y = (_this$_getPartXY2 = this._getPartXY(PART)) === null || _this$_getPartXY2 === void 0 ? void 0 : _this$_getPartXY2.y) !== null && _this$_getPartXY$y !== void 0 ? _this$_getPartXY$y : 0;
+  }
+  getVis(_ref4) {
+    var _this$_getPart$visibi, _this$_getPart;
+    let {
+      PART
+    } = _ref4;
+    return (_this$_getPart$visibi = (_this$_getPart = this._getPart(PART)) === null || _this$_getPart === void 0 ? void 0 : _this$_getPart.visibility) !== null && _this$_getPart$visibi !== void 0 ? _this$_getPart$visibi : 0;
+  }
+  angleABC(_ref5) {
+    let {
+      A,
+      B,
+      C
+    } = _ref5;
+    const a = this._getPartXY(A),
+      b = this._getPartXY(B),
+      c = this._getPartXY(C);
+    if (!a || !b || !c) return 0;
+    const ab = [a.x - b.x, a.y - b.y],
+      cb = [c.x - b.x, c.y - b.y];
+    const dot = ab[0] * cb[0] + ab[1] * cb[1];
+    const m1 = Math.hypot(...ab),
+      m2 = Math.hypot(...cb);
+    if (!m1 || !m2) return 0;
+    return Math.round(Math.acos(Math.max(-1, Math.min(1, dot / (m1 * m2)))) * 180 / Math.PI * 10) / 10;
+  }
+  dist(_ref6) {
+    let {
+      P1,
+      P2
+    } = _ref6;
+    const a = this._getPartXY(P1),
+      b = this._getPartXY(P2);
+    if (!a || !b) return 0;
+    return Math.round(Math.hypot(a.x - b.x, a.y - b.y));
+  }
+  isPose(_ref7) {
+    let {
+      POSE
+    } = _ref7;
+    // Simple heuristics good for kids’ activities
+    const L = this._partsAsObj();
+    if (!L) return false;
+    switch (POSE) {
+      case 'Hands Up':
+        return this._above(L.left_wrist, L.left_shoulder) && this._above(L.right_wrist, L.right_shoulder);
+      case 'T-Pose':
+        return this._nearHoriz(L.left_wrist, L.left_shoulder) && this._nearHoriz(L.right_wrist, L.right_shoulder) && this._level(L.left_shoulder, L.right_shoulder);
+      case 'Tree':
+        // one ankle near other knee height
+        return this._nearY(L.left_ankle, L.right_knee) || this._nearY(L.right_ankle, L.left_knee);
+      default:
+        return false;
+    }
+  }
+
+  // ---------- loop ----------
+  async _kick() {
+    this._lastTs = 0;
+    const loop = async ts => {
+      if (!this._running) return;
+      if (!this._lastTs || ts - this._lastTs >= 1000 / this._targetFPS) {
+        await this._tick();
+        this._lastTs = ts;
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+  async _tick() {
+    const video = await this._getVideo();
+    if (!video || !_pose) return;
+    const r = _pose.detectForVideo(video, performance.now());
+    this._poses = r && r.landmarks && r.landmarks.length ? [{
+      landmarks: r.landmarks[0]
+    }] : [];
+    this._emitOverlay(false);
+  }
+  async _getVideo() {
+    // Try Scratch video-sensing if present
+    const vs = this.runtime.ioDevices && this.runtime.ioDevices.video;
+    if (vs && vs.provider && vs.provider.video) {
+      return vs.provider.video; // HTMLVideoElement
+    }
+    // Fallback: create our own
+    if (!this._video) {
+      this._video = document.createElement('video');
+      this._video.autoplay = true;
+      this._video.playsInline = true;
+      this._video.muted = true;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false
+        });
+        this._video.srcObject = stream;
+        await this._video.play();
+      } catch (e) {
+        console.warn('camera error', e);
+        return null;
+      }
+    }
+    return this._video;
+  }
+  _getPart(partName) {
+    const idx = PARTS[partName];
+    if (idx == null) return null;
+    const pose = this._poses[0];
+    if (!pose) return null;
+    return pose.landmarks[idx] || null;
+  }
+  _getPartXY(partName) {
+    const p = this._getPart(partName);
+    if (!p) return null;
+    // Landmarks are normalized (0..1) in video space; map to stage
+    const x = Math.round(p.x * this._stageW);
+    const y = Math.round(p.y * this._stageH);
+    return {
+      x,
+      y
+    };
+  }
+  _emitOverlay(clearOnly) {
+    if (!this._drawOverlay && !clearOnly) return;
+    // Emit a simple array of lines to draw: [[x1,y1,x2,y2], ...]
+    const pose = this._poses[0];
+    const lines = [];
+    if (pose && this._drawOverlay) {
+      const C = (a, b) => {
+        const pa = this._getPartXY(a),
+          pb = this._getPartXY(b);
+        if (pa && pb) lines.push([pa.x, pa.y, pb.x, pb.y]);
+      };
+      // A light skeleton (shoulders->elbows->wrists, hips->knees->ankles)
+      ['left', 'right'].forEach(side => {
+        C("".concat(side, "_shoulder"), "".concat(side, "_elbow"));
+        C("".concat(side, "_elbow"), "".concat(side, "_wrist"));
+        C("".concat(side, "_hip"), "".concat(side, "_knee"));
+        C("".concat(side, "_knee"), "".concat(side, "_ankle"));
+      });
+      C('left_shoulder', 'right_shoulder');
+      C('left_hip', 'right_hip');
+    }
+    this.runtime.emit('POSE_OVERLAY', {
+      lines,
+      clear: !this._drawOverlay || clearOnly
+    });
+  }
+
+  // helpers for boolean poses
+  _above(a, b) {
+    return a && b && a.y < b.y;
+  }
+  _nearHoriz(a, b) {
+    return a && b && Math.abs(a.y - b.y) < 25 && Math.abs(a.x - b.x) > 60;
+  }
+  _level(a, b) {
+    return a && b && Math.abs(a.y - b.y) < 15;
+  }
+  _nearY(a, b) {
+    return a && b && Math.abs(a.y - b.y) < 30;
+  }
+  _partsAsObj() {
+    const o = {};
+    for (const k of Object.keys(PARTS)) {
+      o[k] = this._getPartXY(k);
+    }
+    return o.left_shoulder ? o : null;
+  }
+}
+module.exports = Scratch3Pose;
 
 /***/ }),
 

@@ -1,0 +1,369 @@
+const ArgumentType = require('../../extension-support/argument-type');
+const BlockType = require('../../extension-support/block-type');
+
+class Scratch3Face {
+  constructor(runtime) {
+    this.runtime = runtime;
+
+    this._cameraOn = false;
+    this._detections = [];       // [{x,y,w,h, landmarks, label, conf}]
+    this._facesCountCached = 0;
+
+    // Recognition DB: { label: [Float32Array, ...] }
+    this._db = Object.create(null);
+    this._threshold = 0.72;
+    this._targetFPS = 15;
+
+    this._detector = null;
+    this._embedder = null;
+    this._fileset = null;
+    this._lastTick = 0;
+	this._drawBoxes = false;
+	this._drawLandmarks = false;
+    runtime.on('PROJECT_RUN_START', () => this._tickLoop());
+  }
+
+
+drawBoxes({ONOFF}) {
+  this._drawBoxes = String(ONOFF).toLowerCase() === 'on';
+  if (!this._drawBoxes && !this._drawLandmarks) this._emitOverlay(true); // clear
+}
+drawLandmarks({ONOFF}) {
+  this._drawLandmarks = String(ONOFF).toLowerCase() === 'on';
+  if (!this._drawBoxes && !this._drawLandmarks) this._emitOverlay(true);
+}
+
+  // ---------- LOAD MODELS (MediaPipe Tasks or TF.js) ----------
+//  async _ensureModels() {
+//    if (this._detector && this._embedder && this._fileset) return;
+
+//    const base = this._assetBase(); // points to /static/assets/face/ in both dev & desktop
+//    // Dynamically import MediaPipe Tasks bundle you placed in assets
+//    const tasks = await import(/* webpackIgnore: true */ base + 'tasks-vision.js');
+//    const {FilesetResolver, FaceDetector} = tasks;
+
+//    this._fileset = await FilesetResolver.forVisionTasks(base);
+//    this._detector = await FaceDetector.createFromOptions(this._fileset, {
+//      baseOptions: { modelAssetPath: base + 'face_detection.task' },
+//      runningMode: 'IMAGE'
+//    });
+
+//    // Embeddings: either MediaPipe face embedder if you have it, or TF.js MobileFaceNet.
+//    // Below assumes TF.js model exported and placed in assets as mfn/model.json
+//    // Lazy-load TF.js only when needed:
+//    const tf = await import(/* webpackIgnore: true */ base + 'tf.min.js');
+//    this._tf = tf;
+//    this._embedder = await tf.loadGraphModel(base + 'mfn/model.json');
+//  }
+// ------------------------------------ old ---------------------------
+
+async _ensureModels() {
+  if (this._landmarker) return;
+
+  const base = this._assetBase();
+  const tasks = await import(/* webpackIgnore: true */ base + 'tasks-vision.js');
+
+  // IMPORTANT: point to the wasm directory
+  const files = await tasks.FilesetResolver.forVisionTasks(base + 'wasm/');
+
+  // Create Landmarker (no separate detector needed)
+  this._landmarker = await tasks.FaceLandmarker.createFromOptions(files, {
+    baseOptions: { modelAssetPath: base + 'models/face_landmarker.task' },
+    runningMode: 'IMAGE',
+    numFaces: 5,                // detect up to 5 faces
+    outputFaceBlendshapes: false,
+    outputFacialTransformationMatrixes: false
+  });
+}
+
+
+
+
+
+//--------------------------------------new end -----------------------
+
+  _assetBase() {
+    // Dev (http://localhost:8601/) → "/static/assets/face/"
+    // Desktop (file://…)           → "static/assets/face/"
+    const isHttp = /^https?:/i.test(window.location.href);
+    //return isHttp ? '/static/assets/face/' : 'static/assets/face/';
+    return 'static/assets/face/';
+  }
+
+  _getFrame(size = 256) {
+    const v = this.runtime.ioDevices.video;
+    if (!v) return null;
+    return v.getFrame({ format: 'imageData', width: size, height: size }); // ImageData
+  }
+
+// Detect faces (landmarks -> boxes)
+//---------------------------------old------------------------------------------
+//  async _detectOnce() {
+//    await this._ensureModels();
+//    const frame = this._getFrame(320);
+//    if (!frame) { this._detections = []; this._facesCountCached = 0; return; }
+
+    // Convert ImageData -> HTMLCanvasElement/OffscreenCanvas bitmap for MediaPipe
+    // Minimal utility: draw into a canvas and pass that to detector.
+//    if (!this._canvas) {
+//      this._canvas = document.createElement('canvas');
+//      this._canvas.width = frame.width; this._canvas.height = frame.height;
+//      this._ctx = this._canvas.getContext('2d');
+//    }
+//    this._ctx.putImageData(frame, 0, 0);
+
+    // NOTE: MediaPipe FaceDetector expects HTMLImageElement/Video/Canvas
+//    const results = this._detector.detect(this._canvas);
+    // Map to simple objects
+//    this._detections = (results?.detections || []).map(d => {
+//      const b = d.boundingBox; // {originX, originY, width, height}
+//      return { x: Math.round(b.originX), y: Math.round(b.originY),
+//               w: Math.round(b.width),  h: Math.round(b.height),
+//               landmarks: d.keypoints || [] };
+//    });
+//    this._facesCountCached = this._detections.length;
+//  }
+
+//---------------------------------new------------------------------------------
+async _detectOnce() {
+  await this._ensureModels();
+
+  const frame = this._getFrame(320);
+  if (!frame) { this._detections = []; this._facesCountCached = 0; this._emitOverlay(true); return; }
+
+  if (!this._canvas) {
+    this._canvas = document.createElement('canvas');
+    this._canvas.width = frame.width; this._canvas.height = frame.height;
+    this._ctx = this._canvas.getContext('2d');
+  }
+  this._ctx.putImageData(frame, 0, 0);
+
+  // Landmarker expects an HTMLCanvasElement for IMAGE mode
+  const res = this._landmarker.detect(this._canvas);
+  const W = this._canvas.width, H = this._canvas.height;
+
+  const faces = res?.faceLandmarks || [];
+  this._detections = faces.map(lm => {
+    // lm points are normalized [0..1] in x,y; scale to pixels
+    let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+    const px = lm.map(p => {
+      const x = p.x * W, y = p.y * H;
+      if (x < minx) minx = x; if (x > maxx) maxx = x;
+      if (y < miny) miny = y; if (y > maxy) maxy = y;
+      return {x, y};
+    });
+    return {
+      x: Math.round(minx),
+      y: Math.round(miny),
+      w: Math.round(maxx - minx),
+      h: Math.round(maxy - miny),
+      landmarks: px // store pixel landmarks for overlay & embedding
+    };
+  });
+
+  this._facesCountCached = this._detections.length;
+  this._emitOverlay(); // draw boxes/points if toggled on
+}
+ _getKeyIdxs() {
+    return [33,263,133,362,1,4,61,291,13,14,10,152,234,454];
+  }
+  
+   _embedFromLandmarks(lm) {
+    // expects full landmark array (e.g., 468 pts) with {x,y}
+    if (!lm || lm.length < 468) return null;
+
+    const idxs = this._getKeyIdxs();
+    const pts = idxs.map(i => lm[i]);
+
+    const R_outer = lm[33], L_outer = lm[263];
+    const cx = (R_outer.x + L_outer.x) / 2;
+    const cy = (R_outer.y + L_outer.y) / 2;
+    const eyeDist = Math.hypot(L_outer.x - R_outer.x, L_outer.y - R_outer.y) || 1;
+
+    const vec = [];
+    for (const p of pts) {
+      vec.push((p.x - cx) / eyeDist, (p.y - cy) / eyeDist);
+    }
+
+    const mouthL = lm[61], mouthR = lm[291];
+    const nose  = lm[1],  chin = lm[152];
+    const eyeInR = lm[133], eyeInL = lm[362];
+
+    const mouthW = Math.hypot(mouthR.x - mouthL.x, mouthR.y - mouthL.y) / eyeDist;
+    const faceH  = Math.hypot(chin.x - nose.x,     chin.y - nose.y)     / eyeDist;
+    const eyeW   = Math.hypot(eyeInL.x - eyeInR.x, eyeInL.y - eyeInR.y) / eyeDist;
+
+    vec.push(mouthW, faceH, eyeW);
+
+    let norm = 0; for (const v of vec) norm += v*v; norm = Math.sqrt(norm) || 1;
+    for (let i=0;i<vec.length;i++) vec[i] /= norm;
+
+    return new Float32Array(vec);
+  }
+//---------------------------------new end------------------------------------------
+
+  _tickLoop() {
+    const loop = async () => {
+      const now = performance.now();
+      const interval = 1000 / this._targetFPS;
+      if (now - this._lastTick >= interval && this._cameraOn) {
+        try { await this._detectOnce(); } catch (e) { /* swallow */ }
+        this._lastTick = now;
+      }
+      if (this.runtime && this.runtime.started) {
+        if (typeof window !== 'undefined') window.requestAnimationFrame(loop);
+        else setTimeout(loop, 30);
+      }
+    };
+    loop();
+  }
+  
+_emitOverlay(forceClear = false) {
+  if (!this.runtime || (!this._drawBoxes && !this._drawLandmarks && !forceClear)) return;
+  const payload = {
+    src: 'face',
+    boxes: forceClear ? [] : (this._drawBoxes ? this._detections.map(d => ({x:d.x, y:d.y, w:d.w, h:d.h})) : []),
+    landmarks: forceClear ? [] : (this._drawLandmarks ? this._detections.map(d => (d.landmarks||[]).map(p => ({x:Math.round(p.x), y:Math.round(p.y)}))) : []),
+    frameWidth: this._canvas ? this._canvas.width : 0,
+    frameHeight: this._canvas ? this._canvas.height : 0,
+    ts: Date.now()
+  };
+  this.runtime.emit('FACE_OVERLAY', payload);
+}
+  // ---------- Recognition helpers ----------
+  async _cropAndEmbed(face) {
+    await this._ensureModels();
+    const frame = this._getFrame(256);
+    if (!frame) return null;
+
+    // Crop to face box, resize to 112x112, run embedder (TF.js)
+    if (!this._work) {
+      this._work = document.createElement('canvas');
+      this._workCtx = this._work.getContext('2d');
+    }
+    this._work.width = 112; this._work.height = 112;
+
+    const sx = Math.max(0, face.x);
+    const sy = Math.max(0, face.y);
+    const sw = Math.max(1, face.w);
+    const sh = Math.max(1, face.h);
+    // drawImage(sourceCanvas, sx,sy,sw,sh, dx,dy,dw,dh)
+    this._workCtx.drawImage(this._canvas, sx, sy, sw, sh, 0, 0, 112, 112);
+
+    const tf = this._tf;
+    const img = tf.browser.fromPixels(this._work);
+    const input = img.toFloat().div(255).expandDims(0); // [1,112,112,3]
+    const emb = this._embedder.execute(input);          // model-dependent
+    const arr = await emb.array();                      // [[...128]]
+    tf.dispose([img, input, emb]);
+    return new Float32Array(arr[0]);
+  }
+
+  _cos(a, b) {
+    let dot=0, na=0, nb=0;
+    for (let i=0; i<a.length; i++) { dot+=a[i]*b[i]; na+=a[i]*a[i]; nb+=b[i]*b[i]; }
+    return dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-9);
+  }
+
+  // ---------- Scratch extension surface ----------
+  getInfo() {
+    return {
+      id: 'face',
+      name: 'Face Blocks',
+      color1: '#6A5ACD',
+      color2: '#4E3CC6',
+      blocks: [
+        { opcode: 'startCamera', blockType: BlockType.COMMAND, text: 'start camera' },
+        { opcode: 'stopCamera',  blockType: BlockType.COMMAND, text: 'stop camera' },
+        { opcode: 'cameraReady', blockType: BlockType.BOOLEAN, text: 'camera ready?' },
+
+        { opcode: 'facesCount',  blockType: BlockType.REPORTER, text: 'faces count' },
+        { opcode: 'faceDetected',blockType: BlockType.BOOLEAN,  text: 'face [INDEX] detected?', arguments: { INDEX:{type:ArgumentType.NUMBER, defaultValue:1} } },
+        { opcode: 'faceX',       blockType: BlockType.REPORTER, text: 'face [INDEX] x', arguments:{ INDEX:{type:ArgumentType.NUMBER, defaultValue:1} } },
+        { opcode: 'faceY',       blockType: BlockType.REPORTER, text: 'face [INDEX] y', arguments:{ INDEX:{type:ArgumentType.NUMBER, defaultValue:1} } },
+        { opcode: 'faceW',       blockType: BlockType.REPORTER, text: 'face [INDEX] width', arguments:{ INDEX:{type:ArgumentType.NUMBER, defaultValue:1} } },
+        { opcode: 'faceH',       blockType: BlockType.REPORTER, text: 'face [INDEX] height', arguments:{ INDEX:{type:ArgumentType.NUMBER, defaultValue:1} } },
+	{ opcode: 'drawBoxes',     blockType: BlockType.COMMAND,  text: 'draw boxes [ONOFF]', arguments: { ONOFF:{type:ArgumentType.STRING, defaultValue:'on'} } },
+	{ opcode: 'drawLandmarks', blockType: BlockType.COMMAND,  text: 'draw landmarks [ONOFF]', arguments: { ONOFF:{type:ArgumentType.STRING, defaultValue:'off'} } },
+
+        { opcode: 'trainFace',   blockType: BlockType.COMMAND,  text: 'train face [INDEX] as [LABEL]', arguments:{
+            INDEX:{type:ArgumentType.NUMBER, defaultValue:1}, LABEL:{type:ArgumentType.STRING, defaultValue:'Alice'}
+        }},
+        { opcode: 'recognizeAs', blockType: BlockType.BOOLEAN,  text: 'recognize face [INDEX] as [LABEL]?', arguments:{
+            INDEX:{type:ArgumentType.NUMBER, defaultValue:1}, LABEL:{type:ArgumentType.STRING, defaultValue:'Alice'}
+        }}
+        
+      ]
+    };
+  }
+
+  startCamera() { this.runtime.ioDevices.video.enableVideo(); this._cameraOn = true; }
+  stopCamera()  { this.runtime.ioDevices.video.disableVideo(); this._cameraOn = false; }
+  cameraReady() { return !!this._cameraOn; }
+
+  facesCount() { return this._facesCountCached || 0; }
+  faceDetected({INDEX}) { const i=Math.max(1,Math.floor(INDEX))-1; return !!this._detections[i]; }
+  faceX({INDEX}) { const d=this._detections[Math.max(1,Math.floor(INDEX))-1]; return d?d.x:0; }
+  faceY({INDEX}) { const d=this._detections[Math.max(1,Math.floor(INDEX))-1]; return d?d.y:0; }
+  faceW({INDEX}) { const d=this._detections[Math.max(1,Math.floor(INDEX))-1]; return d?d.w:0; }
+  faceH({INDEX}) { const d=this._detections[Math.max(1,Math.floor(INDEX))-1]; return d?d.h:0; }
+
+//-------------------------------5) Use this embedding in train / recognize----------------------------
+// ------------------------------------------------------old-------------------------
+//  async trainFace({INDEX, LABEL}) {
+//    const d=this._detections[Math.max(1,Math.floor(INDEX))-1];
+//    if (!d || !LABEL) return;
+//    const emb = await this._cropAndEmbed(d);
+//    if (!emb) return;
+//    (this._db[LABEL] ||= []).push(emb);
+//  }
+//  async recognizeAs({INDEX, LABEL}) {
+//    const d=this._detections[Math.max(1,Math.floor(INDEX))-1];
+//    const arr=this._db[LABEL];
+//    if (!d || !arr || arr.length===0) return false;
+//    const emb = await this._cropAndEmbed(d);
+//    if (!emb) return false;
+//    let best = -1;
+//    for (const v of arr) best = Math.max(best, this._cos(v, emb));
+//    return best >= this._threshold;
+//  }
+//------------------------------------------------------ new ------------------------
+
+
+  async recognizeAs({INDEX, LABEL}) {
+    const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+    const arr = this._db[LABEL];
+    if (!d || !arr || arr.length === 0) return false;
+    const emb = this._embedFromLandmarks(d.landmarks);
+    if (!emb) return false;
+
+    let best = -1;
+    for (const v of arr) {
+      let dot=0, na=0, nb=0;
+      for (let i=0;i<v.length;i++){ dot+=v[i]*emb[i]; na+=v[i]*v[i]; nb+=emb[i]*emb[i]; }
+      const cos = dot / (Math.sqrt(na)*Math.sqrt(nb) + 1e-9);
+      if (cos > best) best = cos;
+    }
+    return best >= (this._threshold || 0.85);
+  }
+  
+  
+async trainFace({INDEX, LABEL}) {
+  const d = this._detections[Math.max(1, Math.floor(INDEX)) - 1];
+  if (!d || !LABEL) return;
+  const emb = this._embedFromLandmarks(d.landmarks);
+  if (!emb) return;
+  (this._db[LABEL] ||= []).push(emb);
+}
+
+  
+
+
+
+
+//-------------------------------------------------------new end --------------------
+
+  
+}
+
+module.exports = Scratch3Face;
